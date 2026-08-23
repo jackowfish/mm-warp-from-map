@@ -160,10 +160,10 @@ def preview():
     x = 28
     for ch in "Warp Map":
         if ch == " ":
-            x += 6
+            x += 5
             continue
-        paste_glyph(ch, x, 16)
-        x += NES_FONT_WIDTHS[ord(ch) - 0x20]
+        paste_glyph(ch, x, 11)
+        x += NES_FONT_WIDTHS[ord(ch) - 0x20] * 11 // 16
     paste_glyph("C", 4, 8)  # centered-ish in the circle
 
     outline = canvas.filter(ImageFilter.MaxFilter(2 * scale + 1))

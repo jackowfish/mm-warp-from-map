@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2
+- Hide the hint and disable the warp toggle on the dungeon map page.
+- Shrink the hint text so it stays clear of the MAP header.
+- Replace the icon with an in-game screenshot.
+
 ## 1.1.1
 - The on-screen hint now shows the C button you configured instead of always C-Down. (#1)
 - Restyle the hint to match the game's own item-name text: the game's font, white with a

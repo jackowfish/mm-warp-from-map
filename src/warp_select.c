@@ -56,11 +56,12 @@ static u16 get_toggle_btn(void) {
 }
 
 // True when the player is looking at the overworld map page, idle, with at least one
-// owl statue unlocked, and soaring isn't restricted in this area.
+// owl statue unlocked, and soaring isn't restricted in this area. func_8010A0A4 is the
+// resident check kaleido uses to show the dungeon map instead of the world map.
 static s32 can_enter_warp(PlayState* play) {
     PauseContext* pauseCtx = &play->pauseCtx;
     return (pauseCtx->state == PAUSE_STATE_MAIN) && (pauseCtx->mainState == PAUSE_MAIN_STATE_IDLE) &&
-           (pauseCtx->pageIndex == PAUSE_MAP) &&
+           (pauseCtx->pageIndex == PAUSE_MAP) && !func_8010A0A4(play) &&
            (gSaveContext.save.saveInfo.playerData.owlActivationFlags != 0) &&
            (play->interfaceCtx.restrictions.songOfSoaring == 0);
 }
@@ -227,8 +228,10 @@ RECOMP_HOOK("KaleidoScopeCall_Update") void warp_select_update(PlayState* play) 
 // Icon footprint (the source texture is authored at 2x this in each axis).
 #define WARP_ICON_SCR_W 32
 #define WARP_ICON_SCR_H 16
-// The label starts here, in the game font at its native 16px cell size.
+// The label starts here, in the game font scaled below its native 16px cell size so
+// the text ends before the page's centered "MAP" header.
 #define WARP_LABEL_SCR_X (WARP_PROMPT_SCR_X + 28)
+#define WARP_LABEL_SIZE 11
 // Outline offset in quarter-pixel rect units (1 screen pixel).
 #define WARP_OUTLINE_OFS 4
 
@@ -268,17 +271,20 @@ static void draw_text_pass(GraphicsContext* gfxCtx, s32 outline) {
     for (dy = -WARP_OUTLINE_OFS; dy <= WARP_OUTLINE_OFS; dy += WARP_OUTLINE_OFS) {
         for (dx = -WARP_OUTLINE_OFS; dx <= WARP_OUTLINE_OFS; dx += WARP_OUTLINE_OFS) {
             s32 x4 = (WARP_LABEL_SCR_X << 2) + dx;
+            // Vertically center the scaled cell within the prompt's 16px row.
+            s32 y4 = ((WARP_PROMPT_SCR_Y << 2) + ((16 - WARP_LABEL_SIZE) << 1)) + dy;
 
             if (outline == ((dx == 0) && (dy == 0))) {
                 continue;
             }
             for (i = 0; label[i] != '\0'; i++) {
                 if (label[i] == ' ') {
-                    x4 += 6 << 2; // the table's 8px space reads too wide; tighten it
+                    x4 += 5 << 2; // the table's 8px space reads too wide; tighten it
                     continue;
                 }
-                draw_glyph(gfxCtx, label[i], x4, (WARP_PROMPT_SCR_Y << 2) + dy, 16);
-                x4 += sFontWidths[label[i] - 0x20] << 2;
+                draw_glyph(gfxCtx, label[i], x4, y4, WARP_LABEL_SIZE);
+                // Advance by the table width scaled to the cell size, in quarter pixels.
+                x4 += (sFontWidths[label[i] - 0x20] * WARP_LABEL_SIZE) / 4;
             }
             // "C" inside the button circle, at half size.
             draw_glyph(gfxCtx, 'C', ((WARP_PROMPT_SCR_X << 2) + (15 << 1)) - (4 << 2) + dx,
