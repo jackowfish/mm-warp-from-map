@@ -2,7 +2,7 @@
 
 [manifest]
 id = "mm_recomp_warp_select"
-version = "1.0.5"
+version = "1.1.1"
 display_name = "Warp Select"
 description = """
 Select a Song of Soaring destination straight from the world map in the pause menu \
@@ -38,7 +38,7 @@ default = "C-Down"
 [[manifest.config_options]]
 id = "show_prompt"
 name = "On-screen Prompt"
-description = "Show the 'C-Down: Warp Map' hint on the map page."
+description = "Show the 'Warp Map' hint on the map page. The hint matches the configured button."
 type = "Enum"
 options = [ "Shown", "Hidden" ]
 default = "Shown"

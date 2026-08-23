@@ -1,92 +1,186 @@
 #!/usr/bin/env python3
-"""Generate the on-screen "C-Down: Warp Map" prompt texture as an IA8 C array.
+"""Generate the prompt's C-button icon (circle + direction arrow) as IA8 C arrays.
 
-N64 IA8 = 1 byte per texel: high nibble = intensity (0-15), low nibble = alpha (0-15).
-We render white shapes/text (full intensity) and use the rendered alpha as coverage; the
-mod tints the result black at draw time via the primitive color.
+Original art only - the label text is drawn at runtime from the game's own font, so no
+game asset is baked into the mod. IA8 here carries coverage in alpha (intensity is
+constant); the mod tints each layer with a primitive color: navy outline, white fill.
 
-The texture is authored at 256x32 (4x the on-screen footprint) and rendered from a much
-larger supersampled canvas, so it stays sharp when RT64 upscales it to a high internal
-resolution. The mod uploads it to TMEM in 8-row strips to stay within the 4 KB tile limit.
+The icon is authored at 64x32 (2x the on-screen footprint) and rendered from a larger
+supersampled canvas, so it stays sharp when RT64 upscales it. 64x32 IA8 is 2 KB, which
+fits TMEM in a single tile load.
+
+With MM_ROM set (or the default Zelda64Recompiled ROM present), also renders a preview
+of the full prompt including the runtime-drawn label; the preview is not shipped.
 """
 import os
-from PIL import Image, ImageDraw, ImageFont
+import struct
+from PIL import Image, ImageDraw, ImageFilter
 
-# Authored (source) texture size. Drawn on-screen at half this in each axis.
-W, H = 256, 32
+# Authored (source) icon size. Drawn on-screen at half this in each axis.
+W, H = 64, 32
 # Supersample factor for crisp edges; rendered big then downscaled with LANCZOS.
 SS = 4
-OUT_H = os.path.join(os.path.dirname(__file__), "..", "src", "warp_prompt_tex.h")
+OUT_H = os.path.join(os.path.dirname(__file__), "..", "src", "warp_icon_tex.h")
 PREVIEW = os.path.join(os.path.dirname(__file__), "prompt_preview.png")
 
-
-def load_font(size, bold=True):
-    candidates = [
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/Library/Fonts/Arial Bold.ttf",
-        "/Library/Fonts/Arial.ttf",
-        "/System/Library/Fonts/SFNS.ttf",
-    ]
-    if not bold:
-        candidates = candidates[1:]
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                pass
-    return ImageFont.load_default()
-
-
-big = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
-d = ImageDraw.Draw(big)
+# Index order matches the mod.toml "toggle_button" enum.
+DIRECTIONS = ["down", "up", "left", "right"]
 
 
 def s(v):
     return v * SS
 
 
-# C-button glyph: a bold circle outline with a "C" inside.
-cx, cy, r = s(15), s(H // 2), s(12)
-d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 255, 255, 255), width=s(2))
-cfont = load_font(s(17))
-d.text((cx, cy - s(1)), "C", font=cfont, fill=(255, 255, 255, 255), anchor="mm")
+def render_art(direction):
+    """Coverage (0-255) artwork on a supersampled "L" canvas."""
+    big = Image.new("L", (W * SS, H * SS), 0)
+    d = ImageDraw.Draw(big)
 
-# Down arrow (C-stick down) immediately to the right of the button.
-ax, atop, abot = s(33), s(8), s(24)
-d.polygon([(ax, atop), (ax + s(14), atop), (ax + s(7), abot)], fill=(255, 255, 255, 255))
+    # C-button circle. The "C" inside is drawn at runtime with the game font.
+    cx, cy, r = s(15), s(H // 2), s(12)
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=255, width=s(2))
 
-# Label.
-label_font = load_font(s(22))
-d.text((s(56), s(H // 2) - s(1)), "Warp Map", font=label_font, fill=(255, 255, 255, 255), anchor="lm")
+    # Direction arrow immediately to the right of the button. Same bounding box for
+    # every direction so the label never moves.
+    x0, x1, y0, y1 = s(33), s(47), s(8), s(24)
+    xm, ym = (x0 + x1) // 2, (y0 + y1) // 2
+    tris = {
+        "down": [(x0, y0), (x1, y0), (xm, y1)],
+        "up": [(x0, y1), (x1, y1), (xm, y0)],
+        "left": [(x1, y0), (x1, y1), (x0, ym)],
+        "right": [(x0, y0), (x0, y1), (x1, ym)],
+    }
+    d.polygon(tris[direction], fill=255)
 
-# Downscale to the authored size for crisp anti-aliased edges.
-img = big.resize((W, H), Image.LANCZOS)
+    return big
 
-img.save(PREVIEW)
-img.resize((W * 2, H * 2), Image.NEAREST).save(PREVIEW.replace(".png", "_2x.png"))
 
-# Convert to IA8.
-px = img.load()
-data = bytearray()
-for y in range(H):
-    for x in range(W):
-        rr, gg, bb, aa = px[x, y]
-        inten = max(rr, gg, bb)  # white where drawn
-        ia = ((inten >> 4) << 4) | (aa >> 4)
-        data.append(ia)
+def render(direction):
+    """Return (fill, outline) coverage images at the authored size."""
+    big = render_art(direction)
+    # Outline = the art's coverage dilated outward; drawn underneath in navy.
+    outline = big.filter(ImageFilter.MaxFilter(2 * (2 * SS) + 1))
+    fill = big.resize((W, H), Image.LANCZOS)
+    outline = outline.resize((W, H), Image.LANCZOS)
+    return fill, outline
+
+
+def to_ia8(cov):
+    """Coverage -> IA8: full intensity, coverage as alpha."""
+    px = cov.load()
+    data = bytearray()
+    for y in range(H):
+        for x in range(W):
+            data.append(0xF0 | (px[x, y] >> 4))
+    return data
+
+
+layers = {di: render(di) for di in DIRECTIONS}
+
+
+def write_array(f, name, datas):
+    f.write("static const unsigned char %s[%d][%d] __attribute__((aligned(8))) = {\n"
+            % (name, len(DIRECTIONS), W * H))
+    for di, data in zip(DIRECTIONS, datas):
+        f.write("    { // C-%s\n" % di)
+        for i in range(0, len(data), 16):
+            f.write("    " + ", ".join("0x%02X" % b for b in data[i : i + 16]) + ",\n")
+        f.write("    },\n")
+    f.write("};\n\n")
+
 
 with open(OUT_H, "w") as f:
     f.write("// Auto-generated by tools/gen_prompt_tex.py. Do not edit by hand.\n")
-    f.write("// IA8 texture, %dx%d (drawn on-screen at half size).\n" % (W, H))
-    f.write("#ifndef WARP_PROMPT_TEX_H_GUARD\n#define WARP_PROMPT_TEX_H_GUARD\n\n")
-    f.write("#define WARP_PROMPT_TEX_WIDTH %d\n" % W)
-    f.write("#define WARP_PROMPT_TEX_HEIGHT %d\n\n" % H)
-    f.write("static const unsigned char gWarpPromptTex[%d] __attribute__((aligned(8))) = {\n" % len(data))
-    for i in range(0, len(data), 16):
-        f.write("    " + ", ".join("0x%02X" % b for b in data[i:i + 16]) + ",\n")
-    f.write("};\n\n#endif\n")
+    f.write("// IA8 textures, %dx%d each (drawn on-screen at half size). Original art only.\n" % (W, H))
+    f.write("#ifndef WARP_ICON_TEX_H_GUARD\n#define WARP_ICON_TEX_H_GUARD\n\n")
+    f.write("#define WARP_ICON_TEX_WIDTH %d\n" % W)
+    f.write("#define WARP_ICON_TEX_HEIGHT %d\n\n" % H)
+    f.write("// Direction order matches the mod.toml toggle_button enum: down, up, left, right.\n")
+    f.write("// Coverage-only layers: the mod tints the outline navy and the fill white.\n")
+    write_array(f, "gWarpIconFillTex", [to_ia8(layers[di][0]) for di in DIRECTIONS])
+    write_array(f, "gWarpIconOutlineTex", [to_ia8(layers[di][1]) for di in DIRECTIONS])
+    f.write("#endif\n")
 
-print("wrote", OUT_H, "(%d bytes)" % len(data))
-print("preview", PREVIEW)
+print("wrote", OUT_H)
+
+
+# ---- Optional preview of the full prompt (icon + runtime-style label). Dev only. ----
+
+ROM = os.environ.get(
+    "MM_ROM",
+    os.path.expanduser("~/Library/Application Support/Zelda64Recompiled/mm.n64.us.1.0.z64"),
+)
+DMADATA_OFF = 0x1A500
+NES_FONT_FILE_INDEX = 28
+NES_FONT_SIZE = 0x4E00
+
+# sNESFontWidths (mm-decomp/src/code/z_message_nes.c), same values the mod uses.
+NES_FONT_WIDTHS = [
+    8, 8, 6, 9, 9, 14, 12, 3, 7, 7, 7, 9, 4, 6, 4, 9,
+    10, 5, 9, 9, 10, 9, 9, 9, 9, 9, 6, 6, 9, 11, 9, 11,
+    13, 12, 9, 11, 11, 8, 8, 12, 10, 4, 8, 10, 8, 13, 11, 13,
+    9, 13, 10, 10, 9, 10, 11, 15, 11, 10, 10, 7, 10, 7, 10, 9,
+    5, 8, 9, 8, 9, 9, 6, 9, 8, 4, 6, 8, 4, 12, 9, 9,
+    9, 9, 7, 8, 7, 8, 9, 12, 8, 9, 8, 7, 5, 7, 10, 6,
+]
+
+
+def preview():
+    if not os.path.exists(ROM):
+        print("no ROM found; skipping preview")
+        return
+    with open(ROM, "rb") as fh:
+        rom = fh.read()
+    off = DMADATA_OFF + NES_FONT_FILE_INDEX * 16
+    v0, v1, r0, r1 = struct.unpack(">4I", rom[off : off + 16])
+    if (v1 - v0) != NES_FONT_SIZE or r1 != 0:
+        print("unexpected dmadata entry; skipping preview")
+        return
+    font = rom[r0 : r0 + NES_FONT_SIZE]
+
+    def glyph(ch):
+        data = font[(ord(ch) - 0x20) * 0x80 :][:0x80]
+        img = Image.new("L", (16, 16))
+        px = img.load()
+        for i, byte in enumerate(data):
+            y, x = divmod(i * 2, 16)
+            px[x, y] = (byte >> 4) * 17
+            px[x + 1, y] = (byte & 0xF) * 17
+        return img
+
+    # Screen-scale mock: 2x the on-screen prompt, like the mod draws it.
+    scale = 2
+    canvas = Image.new("L", (170 * scale, 16 * scale), 0)
+
+    def paste_glyph(ch, x, size):
+        g = glyph(ch).resize((size * scale, size * scale), Image.LANCZOS)
+        canvas.paste(g, (x * scale, (16 - size) // 2 * scale), g)
+
+    icon_fill, icon_outline = layers["down"]
+    x = 28
+    for ch in "Warp Map":
+        if ch == " ":
+            x += 6
+            continue
+        paste_glyph(ch, x, 16)
+        x += NES_FONT_WIDTHS[ord(ch) - 0x20]
+    paste_glyph("C", 4, 8)  # centered-ish in the circle
+
+    outline = canvas.filter(ImageFilter.MaxFilter(2 * scale + 1))
+    sheet = Image.new("RGBA", canvas.size, (200, 200, 200, 255))
+    icon_o = icon_outline.resize((32 * scale, 16 * scale), Image.LANCZOS)
+    icon_f = icon_fill.resize((32 * scale, 16 * scale), Image.LANCZOS)
+    for cov, color, pos in [
+        (icon_o, (8, 24, 72, 255), (0, 0)),
+        (outline, (8, 24, 72, 255), (0, 0)),
+        (icon_f, (225, 240, 255, 255), (0, 0)),
+        (canvas, (225, 240, 255, 255), (0, 0)),
+    ]:
+        layer = Image.new("RGBA", cov.size, color)
+        layer.putalpha(cov)
+        sheet.alpha_composite(layer, pos)
+    sheet.resize((sheet.width * 2, sheet.height * 2), Image.NEAREST).save(PREVIEW)
+    print("preview", PREVIEW)
+
+
+preview()

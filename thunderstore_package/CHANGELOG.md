@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1
+- The on-screen hint now shows the C button you configured instead of always C-Down. (#1)
+- Restyle the hint to match the game's own item-name text: the game's font, white with a
+  navy outline. (#1)
+- The hint's font is read from your own game at runtime; the mod ships no game assets.
+- New icon.
+
 ## 1.0.5
 - Fix confirming a destination doing nothing. Selecting a warp from the map now actually
   warps you, instead of just closing the menu.

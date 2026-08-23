@@ -20,7 +20,7 @@
 // reference any symbol that lives in the overlay at runtime (see note below).
 #include "overlays/kaleido_scope/ovl_kaleido_scope/z_kaleido_scope.h"
 
-#include "warp_prompt_tex.h"
+#include "warp_icon_tex.h"
 
 // The pause menu's update/draw entry points are *resident* wrappers in main `code`
 // (KaleidoScopeCall_Update / KaleidoScopeCall_Draw). The functions they dispatch to
@@ -37,6 +37,13 @@ static PlayState* sPlay = NULL;
 // True while a selection started from the pause map is in progress. Gates trigger_warp so
 // we never interfere with an actual Song of Soaring (where the player consumes ocarinaMode).
 static s32 sFromMapWarp = false;
+
+// The game's message font, DMA'd from the player's own ROM on first use so the mod
+// ships no game asset. nes_font_static: 16x16 i4 glyphs, 0x80 bytes each.
+#define NES_FONT_VROM 0xACC000
+#define NES_FONT_SIZE 0x4E00
+static u8 sNesFont[NES_FONT_SIZE] __attribute__((aligned(16)));
+static s32 sNesFontLoaded = false;
 
 // Which C button toggles warp mode. Index matches the mod.toml "toggle_button" enum.
 static u16 get_toggle_btn(void) {
@@ -173,6 +180,12 @@ RECOMP_HOOK("KaleidoScopeCall_Update") void warp_select_update(PlayState* play) 
 
     sPlay = play;
 
+    // Fetch the game font from the player's ROM the first time the menu updates.
+    if (!sNesFontLoaded) {
+        DmaMgr_SendRequest0(sNesFont, NES_FONT_VROM, NES_FONT_SIZE);
+        sNesFontLoaded = true;
+    }
+
     // If we opened the selector from the map and the native confirm has set an owl-warp
     // ocarina mode, perform the warp ourselves (the player can't, see trigger_warp).
     if (sFromMapWarp) {
@@ -208,50 +221,122 @@ RECOMP_HOOK("KaleidoScopeCall_Update") void warp_select_update(PlayState* play) 
     }
 }
 
-// On-screen footprint (the source texture is authored at 2x this in each axis) and
-// position: top-left of the map page, just left of the centered "MAP" header.
-#define WARP_PROMPT_SCR_W 128
-#define WARP_PROMPT_SCR_H 16
+// On-screen position: top-left of the map page, just left of the centered "MAP" header.
 #define WARP_PROMPT_SCR_X 51
 #define WARP_PROMPT_SCR_Y 43
-// Upload the texture in 8-row strips so each TMEM tile stays well under the 4 KB limit.
-#define WARP_PROMPT_STRIP_ROWS 8
-#define WARP_PROMPT_STRIPS (WARP_PROMPT_TEX_HEIGHT / WARP_PROMPT_STRIP_ROWS)
+// Icon footprint (the source texture is authored at 2x this in each axis).
+#define WARP_ICON_SCR_W 32
+#define WARP_ICON_SCR_H 16
+// The label starts here, in the game font at its native 16px cell size.
+#define WARP_LABEL_SCR_X (WARP_PROMPT_SCR_X + 28)
+// Outline offset in quarter-pixel rect units (1 screen pixel).
+#define WARP_OUTLINE_OFS 4
 
-// Draw the "press C-Down for Warp Map" prompt over the world map page, in black.
+// sNESFontWidths from z_message_nes.c, indexed by (char - 0x20). Advance per glyph.
+static const u8 sFontWidths[96] = {
+    8, 8, 6, 9, 9, 14, 12, 3, 7, 7, 7, 9, 4, 6, 4, 9,
+    10, 5, 9, 9, 10, 9, 9, 9, 9, 9, 6, 6, 9, 11, 9, 11,
+    13, 12, 9, 11, 11, 8, 8, 12, 10, 4, 8, 10, 8, 13, 11, 13,
+    9, 13, 10, 10, 9, 10, 11, 15, 11, 10, 10, 7, 10, 7, 10, 9,
+    5, 8, 9, 8, 9, 9, 6, 9, 8, 4, 6, 8, 4, 12, 9, 9,
+    9, 9, 7, 8, 7, 8, 9, 12, 8, 9, 8, 7, 5, 7, 10, 6,
+};
+
+// Rect coordinates below are in quarter pixels (the gSPTextureRectangle unit).
+
+// Draw one glyph from the loaded font as a sizePx-tall rect at (x4, y4).
+static void draw_glyph(GraphicsContext* gfxCtx, char c, s32 x4, s32 y4, s32 sizePx) {
+    s32 dxdy = (16 << 10) / sizePx;
+
+    OPEN_DISPS(gfxCtx);
+
+    gDPLoadTextureBlock_4b(POLY_OPA_DISP++, sNesFont + ((c - 0x20) * 0x80), G_IM_FMT_I, 16, 16, 0,
+                           G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
+                           G_TX_NOLOD);
+    gSPTextureRectangle(POLY_OPA_DISP++, x4, y4, x4 + (sizePx << 2), y4 + (sizePx << 2), G_TX_RENDERTILE, 0, 0, dxdy,
+                        dxdy);
+
+    CLOSE_DISPS(gfxCtx);
+}
+
+// Draw one pass of the label and the C-in-circle glyph. For the outline pass the
+// glyphs are drawn at the eight 1px offsets; the fill pass draws them once, centered.
+static void draw_text_pass(GraphicsContext* gfxCtx, s32 outline) {
+    static const char label[] = "Warp Map";
+    s32 dx, dy, i;
+
+    for (dy = -WARP_OUTLINE_OFS; dy <= WARP_OUTLINE_OFS; dy += WARP_OUTLINE_OFS) {
+        for (dx = -WARP_OUTLINE_OFS; dx <= WARP_OUTLINE_OFS; dx += WARP_OUTLINE_OFS) {
+            s32 x4 = (WARP_LABEL_SCR_X << 2) + dx;
+
+            if (outline == ((dx == 0) && (dy == 0))) {
+                continue;
+            }
+            for (i = 0; label[i] != '\0'; i++) {
+                if (label[i] == ' ') {
+                    x4 += 6 << 2; // the table's 8px space reads too wide; tighten it
+                    continue;
+                }
+                draw_glyph(gfxCtx, label[i], x4, (WARP_PROMPT_SCR_Y << 2) + dy, 16);
+                x4 += sFontWidths[label[i] - 0x20] << 2;
+            }
+            // "C" inside the button circle, at half size.
+            draw_glyph(gfxCtx, 'C', ((WARP_PROMPT_SCR_X << 2) + (15 << 1)) - (4 << 2) + dx,
+                       ((WARP_PROMPT_SCR_Y + 4) << 2) + dy, 8);
+        }
+    }
+}
+
+// Draw the icon's coverage layer (circle + arrow) for the current pass.
+static void draw_icon_layer(GraphicsContext* gfxCtx, const unsigned char* tex) {
+    s32 dxdy = (WARP_ICON_TEX_WIDTH << 10) / WARP_ICON_SCR_W;
+
+    OPEN_DISPS(gfxCtx);
+
+    gDPLoadTextureBlock(POLY_OPA_DISP++, tex, G_IM_FMT_IA, G_IM_SIZ_8b, WARP_ICON_TEX_WIDTH, WARP_ICON_TEX_HEIGHT, 0,
+                        G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
+                        G_TX_NOLOD);
+    gSPTextureRectangle(POLY_OPA_DISP++, WARP_PROMPT_SCR_X << 2, WARP_PROMPT_SCR_Y << 2,
+                        (WARP_PROMPT_SCR_X + WARP_ICON_SCR_W) << 2, (WARP_PROMPT_SCR_Y + WARP_ICON_SCR_H) << 2,
+                        G_TX_RENDERTILE, 0, 0, dxdy, dxdy);
+
+    CLOSE_DISPS(gfxCtx);
+}
+
+// Draw the "C-<dir>: Warp Map" prompt over the world map page, in the game's own
+// item-name style: everything navy at 1px offsets first, then the white fill on top.
+// Color comes from the primitive color only; the textures supply alpha coverage.
 static void draw_prompt(PlayState* play) {
-    PauseContext* pauseCtx = &play->pauseCtx;
-    s32 stripScrH = WARP_PROMPT_SCR_H / WARP_PROMPT_STRIPS;
-    // 10.5 fixed-point texels-per-pixel; maps the larger source onto the on-screen rect.
-    s32 dsdx = (WARP_PROMPT_TEX_WIDTH << 10) / WARP_PROMPT_SCR_W;
-    s32 dtdy = (WARP_PROMPT_STRIP_ROWS << 10) / stripScrH;
-    s32 i;
+    GraphicsContext* gfxCtx = play->state.gfxCtx;
+    u32 dir = recomp_get_config_u32("toggle_button");
 
-    OPEN_DISPS(play->state.gfxCtx);
+    if (dir > 3) {
+        dir = 0;
+    }
+    if (!sNesFontLoaded) {
+        return;
+    }
+
+    OPEN_DISPS(gfxCtx);
 
     gDPPipeSync(POLY_OPA_DISP++);
     gDPSetCycleType(POLY_OPA_DISP++, G_CYC_1CYCLE);
     gDPSetRenderMode(POLY_OPA_DISP++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
-    gDPSetCombineMode(POLY_OPA_DISP++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+    gDPSetCombineLERP(POLY_OPA_DISP++, 0, 0, 0, PRIMITIVE, TEXEL0, 0, PRIMITIVE, 0, 0, 0, 0, PRIMITIVE, TEXEL0, 0,
+                      PRIMITIVE, 0);
     gDPSetTextureFilter(POLY_OPA_DISP++, G_TF_BILERP);
-    gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 0, 0, 0, pauseCtx->alpha); // black text
 
-    for (i = 0; i < WARP_PROMPT_STRIPS; i++) {
-        s32 sy = WARP_PROMPT_SCR_Y + (i * stripScrH);
+    gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 8, 24, 72, play->pauseCtx.alpha);
+    draw_icon_layer(gfxCtx, gWarpIconOutlineTex[dir]);
+    draw_text_pass(gfxCtx, true);
 
-        gDPLoadTextureBlock(POLY_OPA_DISP++, gWarpPromptTex + (i * WARP_PROMPT_TEX_WIDTH * WARP_PROMPT_STRIP_ROWS),
-                            G_IM_FMT_IA, G_IM_SIZ_8b, WARP_PROMPT_TEX_WIDTH, WARP_PROMPT_STRIP_ROWS, 0,
-                            G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
-                            G_TX_NOLOD);
-
-        gSPTextureRectangle(POLY_OPA_DISP++, WARP_PROMPT_SCR_X << 2, sy << 2,
-                            (WARP_PROMPT_SCR_X + WARP_PROMPT_SCR_W) << 2, (sy + stripScrH) << 2, G_TX_RENDERTILE, 0, 0,
-                            dsdx, dtdy);
-    }
+    gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 225, 240, 255, play->pauseCtx.alpha);
+    draw_icon_layer(gfxCtx, gWarpIconFillTex[dir]);
+    draw_text_pass(gfxCtx, false);
 
     gDPPipeSync(POLY_OPA_DISP++);
 
-    CLOSE_DISPS(play->state.gfxCtx);
+    CLOSE_DISPS(gfxCtx);
 }
 
 // Runs after the resident draw wrapper finishes, so our prompt sits on top of the
