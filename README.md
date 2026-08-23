@@ -10,6 +10,12 @@ back, **Start** to close. Both the button and the on-screen prompt are configura
 It works by flipping the map page into the game's own owl-warp selector (the one the Song of Soaring
 uses), so the map, cursor, confirmation, and warp are all native.
 
+## Screenshots
+
+<img width="1512" height="949" alt="Screenshot 2026-08-23 at 4 17 20 PM" src="https://github.com/user-attachments/assets/3e7d2890-b742-4cd9-9935-1b0e63f8c450" />
+
+<img width="1512" height="949" alt="Screenshot 2026-08-23 at 4 17 36 PM" src="https://github.com/user-attachments/assets/94f8d6c2-d220-4590-8197-7d0d20aac481" />
+
 ## Build
 
 Needs LLVM `clang` + `ld.lld` (Apple clang won't work) and
